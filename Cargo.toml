@@ -1,0 +1,7 @@
+[package]
+name = "zk-profiler"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cudarc = { version = "0.12", features = ["driver"] }
