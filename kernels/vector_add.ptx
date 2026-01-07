@@ -1,0 +1,42 @@
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry vector_add(
+    .param .u64 param_a,
+    .param .u64 param_b,
+    .param .u64 param_c,
+    .param .u32 param_n
+) {
+    .reg .u64 %ra, %rb, %rc, %addr_a, %addr_b, %addr_c, %offset;
+    .reg .u32 %n, %global_id;
+    .reg .f32 %va, %vb, %vc;
+    .reg .pred %p;
+
+    ld.param.u64 %ra, [param_a];
+    ld.param.u64 %rb, [param_b];
+    ld.param.u64 %rc, [param_c];
+    ld.param.u32 %n, [param_n];
+
+    mov.u32 %global_id, %ctaid.x;
+    mul.lo.u32 %global_id, %global_id, %ntid.x;
+    add.u32 %global_id, %global_id, %tid.x;
+
+    setp.ge.u32 %p, %global_id, %n;
+    @%p bra done;
+
+    cvt.u64.u32 %offset, %global_id;
+    shl.b64 %offset, %offset, 2;
+
+    add.u64 %addr_a, %ra, %offset;
+    add.u64 %addr_b, %rb, %offset;
+    add.u64 %addr_c, %rc, %offset;
+
+    ld.global.f32 %va, [%addr_a];
+    ld.global.f32 %vb, [%addr_b];
+    add.f32 %vc, %va, %vb;
+    st.global.f32 [%addr_c], %vc;
+
+done:
+    ret;
+}

@@ -1,5 +1,4 @@
 /target
-*.ptx
 *.cubin
 *.fatbin
 .claude/
