@@ -1,3 +1,6 @@
+pub mod field;
+pub mod poseidon;
+
 use cudarc::driver::{CudaDevice, CudaSlice, LaunchAsync, LaunchConfig};
 use std::sync::Arc;
 
@@ -12,6 +15,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let result = vector_add(&dev, &a, &b)?;
     println!("vector_add({:?}, {:?}) = {:?}", a, b, result);
+
+    // CPU Poseidon demo
+    let input = [field::Fp::ZERO; poseidon::T];
+    let output = poseidon::poseidon_permutation(&input);
+    println!("poseidon([0,0,0]) = {:?}", output.map(|x| x.from_mont()));
 
     Ok(())
 }
