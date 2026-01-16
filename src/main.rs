@@ -1,3 +1,4 @@
+pub mod cupti;
 pub mod field;
 pub mod poseidon;
 
@@ -23,11 +24,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input = [Fp::ZERO; poseidon::T];
     let cpu_out = poseidon::poseidon_permutation(&input);
 
-    // GPU Poseidon
+    // GPU Poseidon with CUPTI timing
+    let timer = cupti::CuptiTimer::new()?;
     let gpu_out = poseidon_gpu(&dev, &[input])?;
+    timer.flush();
 
     assert_eq!(gpu_out[0], cpu_out, "GPU output must match CPU");
-    println!("poseidon GPU == CPU ✓  {:?}", cpu_out.map(|x| x.from_mont()));
+    println!("poseidon GPU == CPU ✓");
+
+    for t in timer.results() {
+        println!("  kernel: {:?}  duration: {:.2} μs", t.name, t.duration_us());
+    }
 
     Ok(())
 }
@@ -281,10 +288,59 @@ mod tests {
 
     #[test]
     fn test_fp_limb_roundtrip() {
-        // CPU-only: verify pack/unpack is lossless
         let fp = Fp::from_u64(0xdeadbeef_cafebabe);
         let limbs = fp_to_gpu_limbs(&fp);
         let recovered = fp_from_gpu_limbs(&limbs);
         assert_eq!(fp, recovered);
+    }
+
+    // --- Step 5: CUPTI Activity API timing ---
+
+    #[test]
+    fn test_cupti_timing_poseidon() {
+        if !has_gpu() { eprintln!("skipping: no GPU available"); return; }
+        let dev = CudaDevice::new(0).unwrap();
+        let timer = cupti::CuptiTimer::new().expect("CUPTI init failed");
+
+        poseidon_gpu(&dev, &[[Fp::ZERO; poseidon::T]]).unwrap();
+        timer.flush();
+
+        let results = timer.results();
+        assert!(!results.is_empty(), "expected at least one kernel timing record");
+
+        let t = &results[0];
+        assert!(t.end_ns > t.start_ns, "end must be after start");
+        assert!(t.duration_us() > 0.0, "duration must be positive");
+    }
+
+    #[test]
+    fn test_cupti_timing_duration_plausible() {
+        if !has_gpu() { eprintln!("skipping: no GPU available"); return; }
+        let dev = CudaDevice::new(0).unwrap();
+        let timer = cupti::CuptiTimer::new().unwrap();
+
+        poseidon_gpu(&dev, &[[Fp::ZERO; poseidon::T]]).unwrap();
+        timer.flush();
+
+        let results = timer.results();
+        assert!(!results.is_empty());
+        let us = results[0].duration_us();
+        // Sanity: Poseidon permutation should take between 1μs and 100ms
+        assert!(us > 1.0,     "duration {} μs suspiciously short", us);
+        assert!(us < 100_000.0, "duration {} μs suspiciously long", us);
+    }
+
+    #[test]
+    fn test_cupti_timing_reset() {
+        if !has_gpu() { eprintln!("skipping: no GPU available"); return; }
+        let dev = CudaDevice::new(0).unwrap();
+        let timer = cupti::CuptiTimer::new().unwrap();
+
+        poseidon_gpu(&dev, &[[Fp::ZERO; poseidon::T]]).unwrap();
+        timer.flush();
+        assert!(!timer.results().is_empty());
+
+        timer.reset();
+        assert_eq!(timer.results().len(), 0, "reset should clear all records");
     }
 }
