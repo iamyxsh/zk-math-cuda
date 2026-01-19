@@ -24,19 +24,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input = [Fp::ZERO; poseidon::T];
     let cpu_out = poseidon::poseidon_permutation(&input);
 
-    // GPU Poseidon with CUPTI timing
+    // GPU Poseidon correctness check
     let timer = cupti::CuptiTimer::new()?;
     let gpu_out = poseidon_gpu(&dev, &[input])?;
     timer.flush();
-
     assert_eq!(gpu_out[0], cpu_out, "GPU output must match CPU");
     println!("poseidon GPU == CPU ✓");
 
-    for t in timer.results() {
-        println!("  kernel: {:?}  duration: {:.2} μs", t.name, t.duration_us());
-    }
+    // Multi-launch timing variance
+    let stats = run_multi_launch(&dev, 20, 256)?;
+    println!(
+        "\nposeidon 20 launches  batch=256\n  min {:>9.2} μs\n  max {:>9.2} μs\n  mean {:>8.2} μs\n  stddev {:>6.2} μs",
+        stats.min_us, stats.max_us, stats.mean_us, stats.stddev_us
+    );
 
     Ok(())
+}
+
+// --- Multi-launch timing ---
+
+#[derive(Debug)]
+pub struct TimingStats {
+    pub samples: Vec<f64>,
+    pub min_us: f64,
+    pub max_us: f64,
+    pub mean_us: f64,
+    pub stddev_us: f64,
+}
+
+impl TimingStats {
+    pub fn from_durations(samples: Vec<f64>) -> Self {
+        assert!(!samples.is_empty());
+        let n = samples.len() as f64;
+        let min_us = samples.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_us = samples.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let mean_us = samples.iter().sum::<f64>() / n;
+        let variance = samples.iter().map(|&x| (x - mean_us).powi(2)).sum::<f64>() / n;
+        TimingStats { samples, min_us, max_us, mean_us, stddev_us: variance.sqrt() }
+    }
+}
+
+fn run_multi_launch(
+    dev: &Arc<CudaDevice>,
+    n_launches: usize,
+    batch_size: usize,
+) -> Result<TimingStats, Box<dyn std::error::Error>> {
+    let states: Vec<[Fp; poseidon::T]> = (0..batch_size)
+        .map(|i| [Fp::from_u64(i as u64), Fp::ZERO, Fp::ZERO])
+        .collect();
+
+    let timer = cupti::CuptiTimer::new()?;
+
+    for _ in 0..n_launches {
+        poseidon_gpu(dev, &states)?;
+    }
+    timer.flush();
+
+    let records = timer.results();
+    if records.len() != n_launches {
+        return Err(format!(
+            "expected {} timing records, got {}",
+            n_launches,
+            records.len()
+        )
+        .into());
+    }
+
+    let durations: Vec<f64> = records.iter().map(|t| t.duration_us()).collect();
+    Ok(TimingStats::from_durations(durations))
 }
 
 // --- Poseidon GPU launcher ---
@@ -342,5 +397,49 @@ mod tests {
 
         timer.reset();
         assert_eq!(timer.results().len(), 0, "reset should clear all records");
+    }
+
+    // --- Step 6: multi-launch timing variance ---
+
+    #[test]
+    fn test_multi_launch_count() {
+        if !has_gpu() { eprintln!("skipping: no GPU available"); return; }
+        let dev = CudaDevice::new(0).unwrap();
+        let stats = run_multi_launch(&dev, 10, 1).unwrap();
+        assert_eq!(stats.samples.len(), 10, "one timing record per launch");
+    }
+
+    #[test]
+    fn test_multi_launch_all_positive() {
+        if !has_gpu() { eprintln!("skipping: no GPU available"); return; }
+        let dev = CudaDevice::new(0).unwrap();
+        let stats = run_multi_launch(&dev, 5, 64).unwrap();
+        for (i, &us) in stats.samples.iter().enumerate() {
+            assert!(us > 0.0, "launch {} duration must be positive, got {}", i, us);
+        }
+    }
+
+    #[test]
+    fn test_multi_launch_stats_invariants() {
+        if !has_gpu() { eprintln!("skipping: no GPU available"); return; }
+        let dev = CudaDevice::new(0).unwrap();
+        let stats = run_multi_launch(&dev, 10, 256).unwrap();
+        assert!(stats.min_us <= stats.mean_us, "min <= mean");
+        assert!(stats.mean_us <= stats.max_us, "mean <= max");
+        assert!(stats.stddev_us >= 0.0,        "stddev >= 0");
+        assert!(stats.mean_us > 0.0,           "mean > 0");
+    }
+
+    #[test]
+    fn test_multi_launch_larger_batch_is_slower() {
+        if !has_gpu() { eprintln!("skipping: no GPU available"); return; }
+        let dev = CudaDevice::new(0).unwrap();
+        let small = run_multi_launch(&dev, 5, 1).unwrap();
+        let large = run_multi_launch(&dev, 5, 4096).unwrap();
+        assert!(
+            large.mean_us > small.mean_us,
+            "batch=4096 mean {:.2}μs should exceed batch=1 mean {:.2}μs",
+            large.mean_us, small.mean_us
+        );
     }
 }
