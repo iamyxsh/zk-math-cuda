@@ -1,6 +1,7 @@
 pub mod cupti;
 pub mod field;
 pub mod poseidon;
+pub mod stall_counters;
 
 use cudarc::driver::{CudaDevice, CudaSlice, LaunchAsync, LaunchConfig};
 use field::Fp;
@@ -38,7 +39,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stats.min_us, stats.max_us, stats.mean_us, stats.stddev_us
     );
 
+    // Warp stall counters
+    match profile_poseidon_stalls(&dev, 256) {
+        Ok(stalls) => {
+            println!("\nposeidon stall breakdown (batch=256):");
+            for s in &stalls {
+                println!("  {:<35} {}", s.name, s.count);
+            }
+        }
+        Err(e) => eprintln!("stall profiling unavailable: {}", e),
+    }
+
     Ok(())
+}
+
+// --- Warp stall profiling ---
+
+fn profile_poseidon_stalls(
+    dev: &Arc<CudaDevice>,
+    batch_size: usize,
+) -> Result<Vec<stall_counters::StallCounter>, Box<dyn std::error::Error>> {
+    let states: Vec<[Fp; poseidon::T]> = (0..batch_size)
+        .map(|i| [Fp::from_u64(i as u64), Fp::ZERO, Fp::ZERO])
+        .collect();
+
+    let profiler = stall_counters::StallProfiler::new()?;
+    poseidon_gpu(dev, &states)?;
+    Ok(profiler.read())
 }
 
 // --- Multi-launch timing ---
@@ -441,5 +468,52 @@ mod tests {
             "batch=4096 mean {:.2}μs should exceed batch=1 mean {:.2}μs",
             large.mean_us, small.mean_us
         );
+    }
+
+    // --- Step 7: warp stall counters ---
+
+    #[test]
+    fn test_stall_profiler_creates_after_context() {
+        if !has_gpu() { eprintln!("skipping: no GPU available"); return; }
+        let _dev = CudaDevice::new(0).unwrap();
+        let p = stall_counters::StallProfiler::new();
+        assert!(p.is_ok(), "StallProfiler::new failed: {:?}", p.err());
+    }
+
+    #[test]
+    fn test_stall_counters_returns_known_events() {
+        if !has_gpu() { eprintln!("skipping: no GPU available"); return; }
+        let dev = CudaDevice::new(0).unwrap();
+        let p = stall_counters::StallProfiler::new().unwrap();
+        poseidon_gpu(&dev, &[[Fp::ZERO; poseidon::T]]).unwrap();
+        let stalls = p.read();
+        assert!(!stalls.is_empty(), "at least one stall event expected");
+        for s in &stalls {
+            assert!(
+                s.name.starts_with("stall_"),
+                "unexpected event name: '{}'", s.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_stall_memory_dependency_present() {
+        if !has_gpu() { eprintln!("skipping: no GPU available"); return; }
+        let dev = CudaDevice::new(0).unwrap();
+        let p = stall_counters::StallProfiler::new().unwrap();
+        poseidon_gpu(&dev, &[[Fp::ZERO; poseidon::T]]).unwrap();
+        let stalls = p.read();
+        let found = stalls.iter().any(|s| s.name == "stall_memory_dependency");
+        assert!(found, "stall_memory_dependency must be present; got: {:?}",
+            stalls.iter().map(|s| &s.name).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_stall_counts_nonzero_large_batch() {
+        if !has_gpu() { eprintln!("skipping: no GPU available"); return; }
+        let dev = CudaDevice::new(0).unwrap();
+        let stalls = profile_poseidon_stalls(&dev, 1024).unwrap();
+        let total: u64 = stalls.iter().map(|s| s.count).sum();
+        assert!(total > 0, "expected non-zero stall counts for batch=1024, got 0");
     }
 }
