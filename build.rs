@@ -5,6 +5,7 @@ fn main() {
     cc::Build::new()
         .file("src/cupti_wrapper.c")
         .file("src/stall_counters.c")
+        .file("src/occupancy.c")
         .include(format!("{}/include", cuda_path))
         .opt_level(2)
         .compile("cupti_wrapper");
@@ -14,4 +15,5 @@ fn main() {
     println!("cargo:rustc-link-search=native={}/lib64", cuda_path);
     println!("cargo:rerun-if-changed=src/cupti_wrapper.c");
     println!("cargo:rerun-if-changed=src/stall_counters.c");
+    println!("cargo:rerun-if-changed=src/occupancy.c");
 }

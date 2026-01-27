@@ -1,6 +1,7 @@
 pub mod cupti;
 pub mod field;
 pub mod poseidon;
+pub mod occupancy;
 pub mod stall_counters;
 
 use cudarc::driver::{CudaDevice, CudaSlice, LaunchAsync, LaunchConfig};
@@ -48,6 +49,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Err(e) => eprintln!("stall profiling unavailable: {}", e),
+    }
+
+    // Occupancy metrics
+    let block_size = 256u32;
+    let batch = 256usize;
+    let grid_size = (batch as u32 + block_size - 1) / block_size;
+    match occupancy::compute_occupancy(
+        POSEIDON_PTX, "poseidon_permutation_kernel",
+        block_size, grid_size, 0,
+    ) {
+        Ok(report) => {
+            println!("\noccupancy (block={}, grid={}):", block_size, grid_size);
+            println!("  SMs              {}", report.device.num_sms);
+            println!("  regs/thread      {}", report.kernel.regs_per_thread);
+            println!("  max blocks/SM    {}", report.kernel.max_active_blocks_per_sm);
+            println!("  theoretical      {:.1}%", report.theoretical_pct);
+            println!("  achieved         {:.1}%", report.achieved_pct);
+        }
+        Err(e) => eprintln!("occupancy query failed: {}", e),
     }
 
     Ok(())
@@ -515,5 +535,56 @@ mod tests {
         let stalls = profile_poseidon_stalls(&dev, 1024).unwrap();
         let total: u64 = stalls.iter().map(|s| s.count).sum();
         assert!(total > 0, "expected non-zero stall counts for batch=1024, got 0");
+    }
+
+    // --- Step 8: occupancy metrics ---
+
+    #[test]
+    fn test_device_props_sane() {
+        if !has_gpu() { eprintln!("skipping: no GPU available"); return; }
+        let _dev = CudaDevice::new(0).unwrap();
+        let props = occupancy::query_device_props().unwrap();
+        assert!(props.num_sms >= 1 && props.num_sms <= 256,
+            "SM count {} out of range", props.num_sms);
+        assert!(props.max_threads_per_sm >= 1024,
+            "max threads/SM {} too low", props.max_threads_per_sm);
+    }
+
+    #[test]
+    fn test_occupancy_report_consistency() {
+        if !has_gpu() { eprintln!("skipping: no GPU available"); return; }
+        let _dev = CudaDevice::new(0).unwrap();
+        let report = occupancy::compute_occupancy(
+            POSEIDON_PTX, "poseidon_permutation_kernel", 256, 1, 0,
+        ).unwrap();
+        // Single block: achieved <= theoretical
+        assert!(report.achieved_pct <= report.theoretical_pct + 0.01,
+            "achieved {:.1}% should not exceed theoretical {:.1}%",
+            report.achieved_pct, report.theoretical_pct);
+    }
+
+    #[test]
+    fn test_occupancy_achieved_scales_with_grid() {
+        if !has_gpu() { eprintln!("skipping: no GPU available"); return; }
+        let _dev = CudaDevice::new(0).unwrap();
+        let small = occupancy::compute_occupancy(
+            POSEIDON_PTX, "poseidon_permutation_kernel", 256, 1, 0,
+        ).unwrap();
+        let large = occupancy::compute_occupancy(
+            POSEIDON_PTX, "poseidon_permutation_kernel", 256, 1024, 0,
+        ).unwrap();
+        assert!(large.achieved_pct >= small.achieved_pct,
+            "more blocks should give >= achieved occupancy");
+    }
+
+    #[test]
+    fn test_occupancy_theoretical_bounded() {
+        if !has_gpu() { eprintln!("skipping: no GPU available"); return; }
+        let _dev = CudaDevice::new(0).unwrap();
+        let report = occupancy::compute_occupancy(
+            POSEIDON_PTX, "poseidon_permutation_kernel", 256, 256, 0,
+        ).unwrap();
+        assert!(report.theoretical_pct > 0.0 && report.theoretical_pct <= 100.0,
+            "theoretical {:.1}% out of [0, 100]", report.theoretical_pct);
     }
 }
