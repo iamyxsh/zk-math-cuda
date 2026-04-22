@@ -1,8 +1,4 @@
 
-# Project Title
-
-A brief description of what this project does and who it's for
-
 # zk-profiler
 
 GPU kernel profiler for zero-knowledge proof primitives, built with Rust + CUDA.
